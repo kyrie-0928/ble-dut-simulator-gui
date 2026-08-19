@@ -21,6 +21,7 @@
 ## 关键决策记录
 
 - 2026-08-19 - 按用户要求删除 `start.bat` 及其文档引用；源码仍可通过 `python app.py` 启动，EXE 继续由 `build_app.ps1` 生成。
+- 2026-08-19 - Windows 端配置串口统一为 115200 baud；UART0 与 GPIO1/3 是 ESP32 固件侧约定，Windows 端只选择 COM 口。
 - 2026-08-18 - 清理生成缓存和 IDE 私有元数据，但保留 `dist/` 现有 EXE：当前目录没有 Git，且 README 将 EXE 作为推荐运行方式。
 - 2026-08-18 - 项目指南以当前源码为准；ESP32 固件行为只记录为外部边界。
 - 2026-08-18 - PID 继续作为 MiBeacon 产品身份；Model 作为 BLE Complete Local Name，UTF-8 最多 18 字节，通过 `CONFIG` 第 10 个字段下发。

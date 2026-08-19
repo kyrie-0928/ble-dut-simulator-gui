@@ -11,7 +11,7 @@
 
 - Python 3 桌面程序；界面使用 Tkinter/ttk，持久化使用 SQLite，串口依赖 `pyserial>=3.5,<4`。依据：`app.py`、`storage.py`、`serial_node.py`、`requirements.txt`。
 - 源码入口是 `app.py:main`；`build_app.ps1` 是 PyInstaller 单文件 EXE 打包入口。
-- 串口默认 1,000,000 baud。README 中 UART GPIO 是固件侧约定，本仓库不配置 GPIO。
+- 串口默认 115,200 baud，与模拟固件 UART0（GPIO1/3）一致；Windows 端只配置 COM 口和波特率，不配置 UART 编号或 GPIO。
 - `build/`、`*.spec`、`__pycache__/` 是可再生生成物；`dist/` 是可再生但可直接交付的 EXE 输出；`.idea/` 是本机 IDE 元数据。
 - 本目录在 2026-08-18 不是 Git 仓库，不能假定删除内容可由 Git 恢复。
 

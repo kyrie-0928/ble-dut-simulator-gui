@@ -51,7 +51,7 @@ class SerialNode:
         self._sequence = (self._sequence + 1) & 0xFFFFFFFF
         return self._sequence
 
-    def connect(self, port_name: str, baudrate: int = 1_000_000) -> None:
+    def connect(self, port_name: str, baudrate: int = 115_200) -> None:
         if serial is None:
             raise RuntimeError("缺少 pyserial，请先执行 pip install -r requirements.txt")
         if self.connected:

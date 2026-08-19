@@ -3,8 +3,8 @@
 独立 Windows 上位机，用于管理最多六块 ESP32-WROOM-32D BLE DUT 模拟板。
 界面采用与 `factory-gui-test` 一致的产测控制台风格，但项目、数据库和运行环境相互独立。
 
-上位机通过 USB 串口配置模拟板，通信参数为 UART1、1000000 baud、
-TX=GPIO27、RX=GPIO14。ESP32 与原测试板之间仍使用 BLE 通信。
+上位机通过 USB 串口配置模拟板；ESP32 固件使用 UART0、115200 baud、
+TX=GPIO1、RX=GPIO3。ESP32 与原测试板之间仍使用 BLE 通信。
 
 ## 功能
 

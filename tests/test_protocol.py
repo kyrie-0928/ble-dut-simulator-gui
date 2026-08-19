@@ -102,7 +102,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_serial_node_uses_fixture_uart_baudrate(self):
         baudrate = inspect.signature(SerialNode.connect).parameters["baudrate"]
-        self.assertEqual(1_000_000, baudrate.default)
+        self.assertEqual(115_200, baudrate.default)
 
 
 if __name__ == "__main__":
