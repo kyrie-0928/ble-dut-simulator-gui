@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,7 @@ class FieldSpec:
     name: str
     kind: str
     count: int = 1
+    default: Any = 0
 
 MAX_DELAY_MS = 600_000
 BLE_NAME_MAX_BYTES = 18
@@ -60,8 +61,12 @@ FAMILY_SCHEMAS: Dict[str, Sequence[FieldSpec]] = {
              FieldSpec("key", "u8", 4)),
 }
 
-_FORMATS = {"u8": ("B", 0, 255), "s8": ("b", -128, 127),
-            "u16": ("H", 0, 65535), "s16": ("h", -32768, 32767)}
+_FORMATS = {
+    "u8": ("B", 0, 255), "s8": ("b", -128, 127),
+    "u16": ("H", 0, 65535), "s16": ("h", -32768, 32767),
+    "u32": ("I", 0, 4294967295), "s32": ("i", -2147483648, 2147483647),
+}
+FIELD_KINDS = tuple(_FORMATS)
 _HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
 
 
@@ -89,12 +94,15 @@ def _values(value: Any, count: int) -> List[int]:
     return result
 
 
-def pack_payload(family: str, fields: Mapping[str, Any]) -> bytes:
+def pack_fields(schema: Sequence[FieldSpec], fields: Mapping[str, Any]) -> bytes:
     payload = bytearray()
-    for field in schema_for(family):
+    for field in schema:
         if field.name not in fields:
             raise ValueError(f"缺少字段: {field.name}")
-        fmt, minimum, maximum = _FORMATS[field.kind]
+        try:
+            fmt, minimum, maximum = _FORMATS[field.kind]
+        except KeyError as exc:
+            raise ValueError(f"不支持的字段类型: {field.kind}") from exc
         for value in _values(fields[field.name], field.count):
             if not minimum <= value <= maximum:
                 raise ValueError(
@@ -103,6 +111,33 @@ def pack_payload(family: str, fields: Mapping[str, Any]) -> bytes:
     if len(payload) > 64:
         raise ValueError("Payload 超过固件 64 字节上限")
     return bytes(payload)
+
+
+def validate_schema(schema: Sequence[FieldSpec]) -> None:
+    if not schema:
+        raise ValueError("协议族至少需要一个字段")
+    names = set()
+    payload_size = 0
+    for field in schema:
+        name = field.name.strip()
+        if not name:
+            raise ValueError("字段名称不能为空")
+        if name in names:
+            raise ValueError(f"字段名称重复: {name}")
+        names.add(name)
+        if field.kind not in _FORMATS:
+            raise ValueError(f"不支持的字段类型: {field.kind}")
+        if not 1 <= field.count <= 64:
+            raise ValueError(f"{name} 的元素数量必须在 1..64")
+        payload_size += struct.calcsize("<" + _FORMATS[field.kind][0]) * field.count
+    if payload_size > 64:
+        raise ValueError(f"Payload 长度 {payload_size} 字节，超过固件 64 字节上限")
+    pack_fields(schema, {field.name: field.default for field in schema})
+
+
+def pack_payload(family: str, fields: Mapping[str, Any],
+                 schema: Optional[Sequence[FieldSpec]] = None) -> bytes:
+    return pack_fields(schema if schema is not None else schema_for(family), fields)
 
 
 def normalize_hex(raw: str) -> str:
@@ -114,8 +149,11 @@ def normalize_hex(raw: str) -> str:
     return value.upper()
 
 
-def payload_hex(family: str, fields: Mapping[str, Any], raw_hex: str = "") -> str:
-    return normalize_hex(raw_hex) if raw_hex.strip() else pack_payload(family, fields).hex().upper()
+def payload_hex(family: str, fields: Mapping[str, Any], raw_hex: str = "",
+                schema: Optional[Sequence[FieldSpec]] = None) -> str:
+    return normalize_hex(raw_hex) if raw_hex.strip() else pack_payload(
+        family, fields, schema
+    ).hex().upper()
 
 
 def encode_ble_name(model: Any) -> str:
@@ -142,7 +180,8 @@ def decode_ble_name(encoded: str) -> str:
 
 
 def build_config_command(sequence: int, product: Mapping[str, Any],
-                         advertising: bool = True) -> str:
+                         advertising: bool = True,
+                         schema: Optional[Sequence[FieldSpec]] = None) -> str:
     pid = int(product["pid"])
     if not 1 <= pid <= 65535:
         raise ValueError("PID 必须在 1..65535")
@@ -153,8 +192,10 @@ def build_config_command(sequence: int, product: Mapping[str, Any],
               int(product.get("notify_delay_ms", 0)))
     if any(value < 0 or value > MAX_DELAY_MS for value in delays):
         raise ValueError(f"延时必须在 0..{MAX_DELAY_MS} ms")
-    encoded = payload_hex(str(product["family"]), product["fields"],
-                          str(product.get("raw_payload_hex", "")))
+    encoded = payload_hex(
+        str(product["family"]), product["fields"],
+        str(product.get("raw_payload_hex", "")), schema,
+    )
     model_hex = encode_ble_name(product["model"])
     values = (
         "CONFIG", int(sequence), pid, delays[0], delays[1], delays[2], behavior,

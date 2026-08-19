@@ -9,11 +9,13 @@ sys.path.insert(0, str(HOST))
 
 from protocol import (
     FAMILY_SCHEMAS,
+    FieldSpec,
     build_config_command,
     decode_ble_name,
     encode_ble_name,
     pack_payload,
     payload_hex,
+    validate_schema,
 )
 from serial_node import SerialNode, parse_sim_line
 
@@ -71,6 +73,21 @@ class ProtocolTests(unittest.TestCase):
                   "key": [0, 0], "speed": [0, 0]}
         with self.assertRaisesRegex(ValueError, "version"):
             pack_payload("C6", fields)
+
+    def test_custom_schema_supports_32_bit_signed_values(self):
+        schema = (
+            FieldSpec("counter", "u32", default=0),
+            FieldSpec("offset", "s32", default=-1),
+        )
+        validate_schema(schema)
+        payload = pack_payload(
+            "CUSTOM", {"counter": 0x12345678, "offset": -2}, schema
+        )
+        self.assertEqual("78563412FEFFFFFF", payload.hex().upper())
+
+    def test_custom_schema_rejects_payload_over_64_bytes(self):
+        with self.assertRaisesRegex(ValueError, "64"):
+            validate_schema((FieldSpec("too_large", "u32", 17, 0),))
 
     def test_firmware_delay_limit_is_enforced(self):
         product = dict(self.products[0])

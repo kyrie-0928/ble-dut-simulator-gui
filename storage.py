@@ -6,7 +6,9 @@ import json
 import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
+
+from protocol import FAMILY_SCHEMAS, FieldSpec, pack_fields, validate_schema
 
 
 @dataclass
@@ -27,12 +29,38 @@ class Product:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ProtocolFamily:
+    name: str
+    fields: Sequence[FieldSpec]
+    builtin: bool = False
+
+
+def _schema_to_json(fields: Sequence[FieldSpec]) -> str:
+    return json.dumps([asdict(field) for field in fields], ensure_ascii=False)
+
+
+def _schema_from_json(value: str) -> Sequence[FieldSpec]:
+    return tuple(FieldSpec(**item) for item in json.loads(value))
+
+
+def default_fields(fields: Sequence[FieldSpec]) -> Dict[str, Any]:
+    result = {}
+    for field in fields:
+        default = field.default
+        if field.count > 1 and not isinstance(default, (list, tuple)):
+            default = [default] * field.count
+        result[field.name] = list(default) if isinstance(default, tuple) else default
+    return result
+
+
 class ProductStore:
     def __init__(self, db_path: Path, seed_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(db_path))
         self._connection.row_factory = sqlite3.Row
         self._create_schema()
+        self._seed_families()
         self._seed_once(seed_path)
 
     def close(self) -> None:
@@ -57,8 +85,24 @@ class ProductStore:
                 fields_json TEXT NOT NULL,
                 raw_payload_hex TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS protocol_families (
+                name TEXT PRIMARY KEY,
+                fields_json TEXT NOT NULL,
+                builtin INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 1000
+            );
         """)
         self._connection.commit()
+
+    def _seed_families(self) -> None:
+        with self._connection:
+            for order, (name, fields) in enumerate(FAMILY_SCHEMAS.items()):
+                self._connection.execute(
+                    """INSERT OR IGNORE INTO protocol_families
+                       (name, fields_json, builtin, sort_order)
+                       VALUES (?, ?, 1, ?)""",
+                    (name, _schema_to_json(fields), order),
+                )
 
     def _seed_once(self, seed_path: Path) -> None:
         initialized = self._connection.execute(
@@ -99,6 +143,8 @@ class ProductStore:
         return self._from_row(row) if row else None
 
     def _insert(self, product: Product) -> int:
+        if self.get_family(product.family) is None:
+            raise ValueError(f"未知协议族: {product.family}")
         cursor = self._connection.execute(
             """INSERT INTO products
                (name, model, pid, family, ready_pcba_ms, ready_final_ms,
@@ -119,6 +165,8 @@ class ProductStore:
     def update(self, product: Product) -> None:
         if product.id is None:
             raise ValueError("更新产品必须包含 id")
+        if self.get_family(product.family) is None:
+            raise ValueError(f"未知协议族: {product.family}")
         with self._connection:
             cursor = self._connection.execute(
                 """UPDATE products SET name=?, model=?, pid=?, family=?,
@@ -136,3 +184,100 @@ class ProductStore:
     def delete(self, product_id: int) -> None:
         with self._connection:
             self._connection.execute("DELETE FROM products WHERE id=?", (product_id,))
+
+    def list_families(self) -> List[ProtocolFamily]:
+        rows = self._connection.execute(
+            """SELECT name, fields_json, builtin FROM protocol_families
+               ORDER BY sort_order, name COLLATE NOCASE"""
+        ).fetchall()
+        return [
+            ProtocolFamily(row["name"], _schema_from_json(row["fields_json"]),
+                           bool(row["builtin"]))
+            for row in rows
+        ]
+
+    def get_family(self, name: str) -> Optional[ProtocolFamily]:
+        row = self._connection.execute(
+            """SELECT name, fields_json, builtin FROM protocol_families
+               WHERE name=?""", (name,)
+        ).fetchone()
+        if row is None:
+            return None
+        return ProtocolFamily(
+            row["name"], _schema_from_json(row["fields_json"]), bool(row["builtin"])
+        )
+
+    def add_family(self, family: ProtocolFamily) -> None:
+        name = family.name.strip()
+        if not name:
+            raise ValueError("协议族名称不能为空")
+        validate_schema(family.fields)
+        try:
+            with self._connection:
+                self._connection.execute(
+                    """INSERT INTO protocol_families
+                       (name, fields_json, builtin, sort_order)
+                       VALUES (?, ?, ?, 1000)""",
+                    (name, _schema_to_json(family.fields), int(family.builtin)),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"协议族已存在: {name}") from exc
+
+    def family_usage_count(self, name: str) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS count FROM products WHERE family=?", (name,)
+        ).fetchone()
+        return int(row["count"])
+
+    def update_family(self, old_name: str, family: ProtocolFamily) -> None:
+        current = self.get_family(old_name)
+        if current is None:
+            raise KeyError(old_name)
+        name = family.name.strip()
+        if not name:
+            raise ValueError("协议族名称不能为空")
+        if current.builtin and name != old_name:
+            raise ValueError("内置协议族不能改名，请先复制为自定义协议族")
+        validate_schema(family.fields)
+        if name != old_name and self.get_family(name) is not None:
+            raise ValueError(f"协议族已存在: {name}")
+        defaults = default_fields(family.fields)
+        with self._connection:
+            rows = self._connection.execute(
+                "SELECT id, fields_json FROM products WHERE family=?", (old_name,)
+            ).fetchall()
+            self._connection.execute(
+                """UPDATE protocol_families
+                   SET name=?, fields_json=? WHERE name=?""",
+                (name, _schema_to_json(family.fields), old_name),
+            )
+            for row in rows:
+                existing = json.loads(row["fields_json"])
+                merged = {}
+                for field in family.fields:
+                    value = existing.get(field.name, defaults[field.name])
+                    try:
+                        pack_fields((field,), {field.name: value})
+                    except (TypeError, ValueError):
+                        value = defaults[field.name]
+                    merged[field.name] = value
+                self._connection.execute(
+                    "UPDATE products SET family=?, fields_json=? WHERE id=?",
+                    (name, json.dumps(merged, ensure_ascii=False), row["id"]),
+                )
+
+    def delete_family(self, name: str) -> None:
+        family = self.get_family(name)
+        if family is None:
+            raise KeyError(name)
+        if family.builtin:
+            raise ValueError("内置协议族不能删除，可复制后创建自定义协议族")
+        usage = self.family_usage_count(name)
+        if usage:
+            raise ValueError(f"协议族正在被 {usage} 个产品模板使用，不能删除")
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM protocol_families WHERE name=?", (name,)
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(name)

@@ -9,19 +9,25 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from protocol import (
-    FAMILY_SCHEMAS,
+    FIELD_KINDS,
     MAX_DELAY_MS,
+    FieldSpec,
     build_config_command,
     decode_ble_name,
     encode_ble_name,
     payload_hex,
-    schema_for,
+    validate_schema,
 )
 from serial_node import SerialNode, available_ports
-from storage import Product, ProductStore
+from storage import (
+    Product,
+    ProductStore,
+    ProtocolFamily,
+    default_fields as family_default_fields,
+)
 
 APP_NAME = "BLE 产品产测模拟器"
 NODE_COUNT = 6
@@ -215,15 +221,357 @@ class ResizeSkeletonCanvas(tk.Canvas):
         )
 
 
-def _default_fields(family: str) -> Dict[str, object]:
-    result: Dict[str, object] = {}
-    for field in schema_for(family):
-        result[field.name] = 0 if field.count == 1 else [0] * field.count
-    return result
+def _default_fields(schema: Sequence[FieldSpec]) -> Dict[str, object]:
+    return family_default_fields(schema)
+
+
+class ProtocolFamilyEditorDialog(simpledialog.Dialog):
+    def __init__(self, parent: tk.Misc, family: Optional[ProtocolFamily] = None,
+                 suggested_name: str = ""):
+        self.source = family
+        self.result: Optional[ProtocolFamily] = None
+        self.rows: List[Dict[str, tk.StringVar]] = []
+        self.suggested_name = suggested_name
+        super().__init__(parent, "编辑协议族" if family else "新增协议族")
+
+    def body(self, master: tk.Misc):
+        master.configure(background=COLORS["surface"])
+        master.columnconfigure(1, weight=1)
+        ttk.Label(master, text="协议族名称", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(4, 12), pady=(6, 12)
+        )
+        initial_name = self.source.name if self.source else self.suggested_name
+        self.name_var = tk.StringVar(value=initial_name)
+        name_entry = ttk.Entry(master, textvariable=self.name_var, width=34)
+        name_entry.grid(row=0, column=1, columnspan=4, sticky="ew", pady=(6, 12))
+
+        header_frame = ttk.Frame(master, style="Surface.TFrame")
+        header_frame.grid(row=1, column=0, columnspan=5, sticky="ew")
+        header_columns = (
+            (0, "字段名称", 170, 3),
+            (1, "类型", 90, 0),
+            (2, "数量", 75, 0),
+            (3, "默认值", 160, 2),
+            (4, "顺序/操作", 205, 0),
+        )
+        for column, text, minimum, weight in header_columns:
+            header_frame.columnconfigure(column, minsize=minimum, weight=weight)
+            ttk.Label(header_frame, text=text, style="Muted.TLabel").grid(
+                row=0, column=column, sticky="w", padx=(4, 6), pady=(0, 4)
+            )
+        rows_shell = ttk.Frame(master, style="Surface.TFrame")
+        rows_shell.grid(row=2, column=0, columnspan=5, sticky="nsew")
+        rows_shell.columnconfigure(0, weight=1)
+        rows_shell.rowconfigure(0, weight=1)
+        rows_canvas = tk.Canvas(
+            rows_shell, background=COLORS["surface"], highlightthickness=0,
+            width=720, height=260,
+        )
+        rows_scrollbar = ttk.Scrollbar(
+            rows_shell, orient="vertical", command=rows_canvas.yview
+        )
+        rows_canvas.configure(yscrollcommand=rows_scrollbar.set)
+        rows_canvas.grid(row=0, column=0, sticky="nsew")
+        rows_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.rows_frame = ttk.Frame(rows_canvas, style="Surface.TFrame")
+        rows_window = rows_canvas.create_window(
+            (0, 0), window=self.rows_frame, anchor="nw"
+        )
+        self.rows_frame.bind(
+            "<Configure>",
+            lambda _event: rows_canvas.configure(
+                scrollregion=rows_canvas.bbox("all")
+            ),
+        )
+        rows_canvas.bind(
+            "<Configure>",
+            lambda event: rows_canvas.itemconfigure(rows_window, width=event.width),
+        )
+        master.rowconfigure(2, weight=1)
+
+        source_fields = self.source.fields if self.source else (
+            FieldSpec("version", "u8", 1, 0),
+        )
+        for field in source_fields:
+            self._append_field(field)
+        ttk.Button(master, text="＋ 添加字段", command=self._add_field).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=4, pady=(10, 4)
+        )
+        ttk.Label(
+            master,
+            text="按列表顺序小端打包；总长度不得超过 64 字节",
+            style="Muted.TLabel",
+        ).grid(row=3, column=2, columnspan=3, sticky="e", pady=(10, 4))
+        self.after_idle(lambda: self.minsize(760, 420))
+        return name_entry
+
+    def buttonbox(self) -> None:
+        box = ttk.Frame(self, style="Surface.TFrame")
+        ttk.Button(box, text="保存", style="Primary.TButton", command=self.ok).pack(
+            side="left", padx=6
+        )
+        ttk.Button(box, text="取消", command=self.cancel).pack(side="left", padx=6)
+        box.pack(pady=(4, 12))
+        self.bind("<Return>", self.ok)
+        self.bind("<Escape>", self.cancel)
+
+    @staticmethod
+    def _default_text(field: FieldSpec) -> str:
+        value = field.default
+        if isinstance(value, (list, tuple)):
+            return ",".join(str(item) for item in value)
+        return str(value)
+
+    def _append_field(self, field: FieldSpec) -> None:
+        self.rows.append({
+            "name": tk.StringVar(value=field.name),
+            "kind": tk.StringVar(value=field.kind),
+            "count": tk.StringVar(value=str(field.count)),
+            "default": tk.StringVar(value=self._default_text(field)),
+        })
+        self._render_rows()
+
+    def _add_field(self) -> None:
+        self._append_field(FieldSpec(f"field_{len(self.rows) + 1}", "u8", 1, 0))
+
+    def _render_rows(self) -> None:
+        for child in self.rows_frame.winfo_children():
+            child.destroy()
+        for column, minimum, weight in (
+            (0, 170, 3), (1, 90, 0), (2, 75, 0), (3, 160, 2), (4, 205, 0)
+        ):
+            self.rows_frame.columnconfigure(
+                column, minsize=minimum, weight=weight
+            )
+        for row_index, row in enumerate(self.rows):
+            ttk.Entry(self.rows_frame, textvariable=row["name"], width=16).grid(
+                row=row_index, column=0, sticky="ew", padx=(4, 6), pady=3
+            )
+            ttk.Combobox(
+                self.rows_frame, textvariable=row["kind"], values=FIELD_KINDS,
+                state="readonly", width=7,
+            ).grid(row=row_index, column=1, padx=6, pady=3)
+            ttk.Spinbox(
+                self.rows_frame, textvariable=row["count"], from_=1, to=64, width=6
+            ).grid(row=row_index, column=2, padx=6, pady=3)
+            ttk.Entry(self.rows_frame, textvariable=row["default"], width=16).grid(
+                row=row_index, column=3, padx=6, pady=3
+            )
+            actions = ttk.Frame(self.rows_frame, style="Surface.TFrame")
+            actions.grid(row=row_index, column=4, padx=(6, 4), pady=3)
+            ttk.Button(
+                actions, text="↑", width=3,
+                command=lambda index=row_index: self._move(index, -1),
+            ).pack(side="left")
+            ttk.Button(
+                actions, text="↓", width=3,
+                command=lambda index=row_index: self._move(index, 1),
+            ).pack(side="left", padx=3)
+            ttk.Button(
+                actions, text="删除", width=5,
+                command=lambda index=row_index: self._remove(index),
+            ).pack(side="left")
+
+    def _move(self, index: int, offset: int) -> None:
+        destination = index + offset
+        if 0 <= destination < len(self.rows):
+            self.rows[index], self.rows[destination] = (
+                self.rows[destination], self.rows[index]
+            )
+            self._render_rows()
+
+    def _remove(self, index: int) -> None:
+        if len(self.rows) == 1:
+            messagebox.showwarning("无法删除", "协议族至少需要一个字段", parent=self)
+            return
+        del self.rows[index]
+        self._render_rows()
+
+    @staticmethod
+    def _parse_default(text: str, count: int) -> object:
+        values = [item.strip() for item in text.split(",") if item.strip()]
+        if count == 1:
+            if len(values) != 1:
+                raise ValueError("单值字段只能填写一个默认值")
+            return int(values[0], 0)
+        if len(values) == 1:
+            return [int(values[0], 0)] * count
+        if len(values) != count:
+            raise ValueError(f"数组默认值需要 1 个或 {count} 个数")
+        return [int(item, 0) for item in values]
+
+    def validate(self) -> bool:
+        try:
+            name = self.name_var.get().strip()
+            if not name:
+                raise ValueError("协议族名称不能为空")
+            if self.source and self.source.builtin and name != self.source.name:
+                raise ValueError("内置协议族不能改名，请先复制为自定义协议族")
+            fields = []
+            for row in self.rows:
+                count = int(row["count"].get())
+                field = FieldSpec(
+                    row["name"].get().strip(), row["kind"].get(), count,
+                    self._parse_default(row["default"].get(), count),
+                )
+                fields.append(field)
+            validate_schema(fields)
+            self.result = ProtocolFamily(
+                name, tuple(fields), self.source.builtin if self.source else False
+            )
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror("输入错误", str(exc), parent=self)
+            return False
+        return True
+
+    def apply(self) -> None:
+        pass
+
+
+class ProtocolFamilyManagerDialog(simpledialog.Dialog):
+    def __init__(self, parent: tk.Misc, store: ProductStore):
+        self.store = store
+        super().__init__(parent, "协议族管理")
+
+    def body(self, master: tk.Misc):
+        master.configure(background=COLORS["surface"])
+        master.columnconfigure(0, weight=1)
+        master.rowconfigure(1, weight=1)
+        ttk.Label(
+            master, text="协议族定义决定字段顺序和 Payload 打包格式",
+            style="Muted.TLabel",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=(6, 10))
+        self.family_list = tk.Listbox(
+            master, height=14, exportselection=False, font=("Microsoft YaHei UI", 10),
+            relief="solid", borderwidth=1,
+        )
+        self.family_list.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=6)
+        self.family_list.bind("<<ListboxSelect>>", self._selection_changed)
+        buttons = (
+            ("新增", self._new_family),
+            ("复制", self._copy_family),
+            ("编辑", self._edit_family),
+            ("删除", self._delete_family),
+        )
+        for column, (text, command) in enumerate(buttons):
+            ttk.Button(master, text=text, command=command).grid(
+                row=2, column=column, sticky="ew", padx=6, pady=(10, 4)
+            )
+            master.columnconfigure(column, weight=1)
+        self.usage_var = tk.StringVar()
+        ttk.Label(master, textvariable=self.usage_var, style="Muted.TLabel").grid(
+            row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 0)
+        )
+        self._refresh()
+        self.after_idle(lambda: self.minsize(560, 500))
+        return self.family_list
+
+    def buttonbox(self) -> None:
+        box = ttk.Frame(self, style="Surface.TFrame")
+        ttk.Button(box, text="关闭", style="Primary.TButton", command=self.ok).pack()
+        box.pack(pady=(6, 12))
+        self.bind("<Escape>", self.cancel)
+
+    def _refresh(self, selected: str = "") -> None:
+        self.family_list.delete(0, "end")
+        families = self.store.list_families()
+        for family in families:
+            marker = "（内置）" if family.builtin else "（自定义）"
+            self.family_list.insert("end", f"{family.name}  {marker}")
+        names = [family.name for family in families]
+        if names:
+            index = names.index(selected) if selected in names else 0
+            self.family_list.selection_set(index)
+            self.family_list.see(index)
+        self._selection_changed()
+
+    def _selected(self) -> Optional[ProtocolFamily]:
+        selection = self.family_list.curselection()
+        if not selection:
+            return None
+        return self.store.list_families()[selection[0]]
+
+    def _selection_changed(self, _event=None) -> None:
+        family = self._selected()
+        if family is None:
+            self.usage_var.set("")
+            return
+        usage = self.store.family_usage_count(family.name)
+        self.usage_var.set(
+            f"{len(family.fields)} 个字段 · 被 {usage} 个产品模板使用"
+        )
+
+    def _new_family(self) -> None:
+        dialog = ProtocolFamilyEditorDialog(self)
+        if dialog.result is None:
+            return
+        try:
+            self.store.add_family(dialog.result)
+            self._refresh(dialog.result.name)
+        except Exception as exc:
+            messagebox.showerror("新增失败", str(exc), parent=self)
+
+    def _copy_family(self) -> None:
+        source = self._selected()
+        if source is None:
+            return
+        base = f"{source.name}_COPY"
+        name = base
+        suffix = 2
+        while self.store.get_family(name) is not None:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        dialog = ProtocolFamilyEditorDialog(
+            self, ProtocolFamily(name, source.fields, False)
+        )
+        if dialog.result is None:
+            return
+        try:
+            self.store.add_family(
+                ProtocolFamily(dialog.result.name, dialog.result.fields, False)
+            )
+            self._refresh(dialog.result.name)
+        except Exception as exc:
+            messagebox.showerror("复制失败", str(exc), parent=self)
+
+    def _edit_family(self) -> None:
+        source = self._selected()
+        if source is None:
+            return
+        usage = self.store.family_usage_count(source.name)
+        if usage and not messagebox.askyesno(
+            "确认编辑",
+            f"该协议族被 {usage} 个产品使用。保存后这些产品的字段结构会同步更新，是否继续？",
+            parent=self,
+        ):
+            return
+        dialog = ProtocolFamilyEditorDialog(self, source)
+        if dialog.result is None:
+            return
+        try:
+            self.store.update_family(source.name, dialog.result)
+            self._refresh(dialog.result.name)
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc), parent=self)
+
+    def _delete_family(self) -> None:
+        source = self._selected()
+        if source is None:
+            return
+        if not messagebox.askyesno(
+            "确认删除", f"确定删除协议族 {source.name}？", parent=self
+        ):
+            return
+        try:
+            self.store.delete_family(source.name)
+            self._refresh()
+        except Exception as exc:
+            messagebox.showerror("删除失败", str(exc), parent=self)
 
 
 class AddProductDialog(simpledialog.Dialog):
-    def __init__(self, parent: tk.Misc):
+    def __init__(self, parent: tk.Misc, store: ProductStore):
+        self.store = store
         self.result: Optional[Product] = None
         super().__init__(parent, "新增产品模板")
 
@@ -242,12 +590,27 @@ class AddProductDialog(simpledialog.Dialog):
         ttk.Label(master, text="协议族", style="Field.TLabel").grid(
             row=3, column=0, sticky="w", padx=(4, 14), pady=7
         )
-        self.family_var = tk.StringVar(value=next(iter(FAMILY_SCHEMAS)))
-        ttk.Combobox(
-            master, textvariable=self.family_var, values=list(FAMILY_SCHEMAS),
-            state="readonly", width=31,
-        ).grid(row=3, column=1, sticky="ew", pady=7)
+        family_frame = ttk.Frame(master, style="Surface.TFrame")
+        family_frame.grid(row=3, column=1, sticky="ew", pady=7)
+        family_frame.columnconfigure(0, weight=1)
+        names = [family.name for family in self.store.list_families()]
+        self.family_var = tk.StringVar(value=names[0] if names else "")
+        self.family_combo = ttk.Combobox(
+            family_frame, textvariable=self.family_var, values=names,
+            state="readonly", width=24,
+        )
+        self.family_combo.grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            family_frame, text="管理…", command=self._manage_families
+        ).grid(row=0, column=1, padx=(6, 0))
         return master.winfo_children()[1]
+
+    def _manage_families(self) -> None:
+        ProtocolFamilyManagerDialog(self, self.store)
+        names = [family.name for family in self.store.list_families()]
+        self.family_combo.configure(values=names)
+        if self.family_var.get() not in names and names:
+            self.family_var.set(names[0])
 
     def validate(self) -> bool:
         try:
@@ -257,18 +620,23 @@ class AddProductDialog(simpledialog.Dialog):
             encode_ble_name(self.model_var.get())
             if not 1 <= pid <= 65535:
                 raise ValueError("PID 必须在 1..65535")
+            if self.store.get_family(self.family_var.get()) is None:
+                raise ValueError("请选择有效的协议族")
         except ValueError as exc:
             messagebox.showerror("输入错误", str(exc), parent=self)
             return False
         return True
 
     def apply(self) -> None:
-        family = self.family_var.get()
+        family = self.store.get_family(self.family_var.get())
+        if family is None:
+            return
         self.result = Product(
             id=None, name=self.name_var.get().strip(),
             model=self.model_var.get().strip(), pid=int(self.pid_var.get()),
-            family=family, ready_pcba_ms=5000, ready_final_ms=5000,
-            notify_delay_ms=0, behavior="normal", fields=_default_fields(family),
+            family=family.name, ready_pcba_ms=5000, ready_final_ms=5000,
+            notify_delay_ms=0, behavior="normal",
+            fields=_default_fields(family.fields),
         )
 
 
@@ -606,7 +974,7 @@ class SimulatorApp(tk.Tk):
         self.product_tree.heading("#0", text="产品")
         self.product_tree.heading("pid", text="PID")
         self.product_tree.heading("model", text="Model")
-        self.product_tree.column("#0", width=145, minwidth=110)
+        self.product_tree.column("#0", width=145, minwidth=110, anchor="center")
         self.product_tree.column("pid", width=65, anchor="center")
         self.product_tree.column("model", width=76, anchor="center")
         scrollbar = ttk.Scrollbar(tree_shell, orient="vertical", command=self.product_tree.yview)
@@ -644,7 +1012,6 @@ class SimulatorApp(tk.Tk):
         self.final_var = tk.StringVar()
         self.notify_var = tk.StringVar()
         self.behavior_var = tk.StringVar()
-        self.raw_var = tk.StringVar()
 
         ttk.Label(parent, text="名称", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=self.name_var).grid(
@@ -657,9 +1024,14 @@ class SimulatorApp(tk.Tk):
             ttk.Label(parent, text=left[0], style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=4)
             if row == 3:
                 widget = ttk.Combobox(
-                    parent, textvariable=left[1], values=list(FAMILY_SCHEMAS), state="readonly"
+                    parent, textvariable=left[1],
+                    values=[family.name for family in self.store.list_families()],
+                    state="readonly",
                 )
-                widget.bind("<<ComboboxSelected>>", lambda _event: self._family_changed())
+                self.family_combo = widget
+                self.family_combo.bind(
+                    "<<ComboboxSelected>>", lambda _event: self._family_changed()
+                )
             else:
                 widget = ttk.Entry(parent, textvariable=left[1])
             widget.grid(row=row, column=1, sticky="ew", padx=(10, 18), pady=4)
@@ -696,34 +1068,57 @@ class SimulatorApp(tk.Tk):
         field_header.grid(row=8, column=0, columnspan=4, sticky="ew")
         ttk.Label(field_header, text="协议字段", style="Section.TLabel").pack(side="left")
         ttk.Label(
-            field_header, text="数组使用英文逗号分隔 · 支持 0x 前缀", style="Muted.TLabel"
-        ).pack(side="right")
-        self.fields_frame = ttk.Frame(parent, style="Surface.TFrame")
-        self.fields_frame.grid(row=9, column=0, columnspan=4, sticky="nsew", pady=(6, 0))
+            parent,
+            text="字段名、类型、数量、默认值、顺序均可自定义 · 数组用英文逗号分隔",
+            style="Muted.TLabel",
+        ).grid(row=9, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        fields_shell = ttk.Frame(parent, style="Surface.TFrame")
+        fields_shell.grid(row=10, column=0, columnspan=4, sticky="nsew", pady=(6, 0))
+        fields_shell.columnconfigure(0, weight=1)
+        fields_shell.rowconfigure(0, weight=1)
+        fields_canvas = tk.Canvas(
+            fields_shell, background=COLORS["surface"], highlightthickness=0
+        )
+        fields_scrollbar = ttk.Scrollbar(
+            fields_shell, orient="vertical", command=fields_canvas.yview
+        )
+        fields_canvas.configure(yscrollcommand=fields_scrollbar.set)
+        fields_canvas.grid(row=0, column=0, sticky="nsew")
+        fields_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.fields_frame = ttk.Frame(fields_canvas, style="Surface.TFrame")
+        fields_window = fields_canvas.create_window(
+            (0, 0), window=self.fields_frame, anchor="nw"
+        )
+        self.fields_frame.bind(
+            "<Configure>",
+            lambda _event: fields_canvas.configure(
+                scrollregion=fields_canvas.bbox("all")
+            ),
+        )
+        fields_canvas.bind(
+            "<Configure>",
+            lambda event: fields_canvas.itemconfigure(
+                fields_window, width=event.width
+            ),
+        )
         self.fields_frame.columnconfigure(1, weight=1)
-        parent.rowconfigure(9, weight=1)
+        parent.rowconfigure(10, weight=1)
 
-        ttk.Label(parent, text="原始 Payload HEX（填写后覆盖字段）", style="Field.TLabel").grid(
-            row=10, column=0, columnspan=4, sticky="w", pady=(10, 3)
-        )
-        ttk.Entry(parent, textvariable=self.raw_var, font=("Cascadia Mono", 9)).grid(
-            row=11, column=0, columnspan=4, sticky="ew"
-        )
-        self.payload_var = tk.StringVar(value="请选择产品")
-        payload_strip = tk.Frame(parent, bg=COLORS["info_bg"], padx=10, pady=7)
-        payload_strip.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        tk.Label(
-            payload_strip, textvariable=self.payload_var, bg=COLORS["info_bg"],
-            fg=COLORS["info"], font=("Cascadia Mono", 9), anchor="w",
-        ).pack(fill="x")
         actions = ttk.Frame(parent, style="Surface.TFrame")
-        actions.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        actions.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        for column in (0, 2, 4):
+            actions.columnconfigure(column, weight=1, uniform="template_actions")
+        actions.columnconfigure(1, minsize=8)
+        actions.columnconfigure(3, minsize=8)
         ttk.Button(
             actions, text="保存模板", style="Primary.TButton", command=self._save_product
-        ).pack(side="left")
-        ttk.Button(actions, text="校验 Payload", command=self._validate_payload).pack(
-            side="left", padx=8
-        )
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            actions, text="管理协议族", command=self._manage_families
+        ).grid(row=0, column=2, sticky="ew")
+        ttk.Button(
+            actions, text="编辑字段名称/结构", command=self._edit_current_family
+        ).grid(row=0, column=4, sticky="ew")
 
     def _build_rack(self, parent: tk.Frame) -> None:
         header = ttk.Frame(parent, style="Surface.TFrame")
@@ -817,20 +1212,19 @@ class SimulatorApp(tk.Tk):
         self.final_var.set(str(product.ready_final_ms))
         self.notify_var.set(str(product.notify_delay_ms))
         self.behavior_var.set(product.behavior)
-        self.raw_var.set(product.raw_payload_hex)
         self.editor_product_var.set(f"{product.model} · PID {product.pid}")
         self._rebuild_fields(product.fields)
-        self._validate_payload(show_dialog=False)
 
     def _rebuild_fields(self, values: Dict[str, object]) -> None:
         for child in self.fields_frame.winfo_children():
             child.destroy()
         self.field_vars.clear()
-        family = self.family_var.get()
-        if family not in FAMILY_SCHEMAS:
+        family = self.store.get_family(self.family_var.get())
+        if family is None:
             return
-        for row, field in enumerate(schema_for(family)):
-            value = values.get(field.name, 0 if field.count == 1 else [0] * field.count)
+        defaults = _default_fields(family.fields)
+        for row, field in enumerate(family.fields):
+            value = values.get(field.name, defaults[field.name])
             text = ",".join(str(item) for item in value) if isinstance(value, list) else str(value)
             variable = tk.StringVar(value=text)
             self.field_vars[field.name] = variable
@@ -845,8 +1239,52 @@ class SimulatorApp(tk.Tk):
                 row=row, column=2, sticky="w"
             )
 
+    def _refresh_family_choices(self, selected: str = "") -> None:
+        names = [family.name for family in self.store.list_families()]
+        self.family_combo.configure(values=names)
+        if selected in names:
+            self.family_var.set(selected)
+        elif self.family_var.get() not in names and names:
+            self.family_var.set(names[0])
+
+    def _manage_families(self) -> None:
+        product_id = self.current_product.id if self.current_product else None
+        ProtocolFamilyManagerDialog(self, self.store)
+        self._refresh_family_choices()
+        if product_id is not None:
+            self._load_product(product_id)
+        elif self.family_var.get():
+            self._family_changed()
+
+    def _edit_current_family(self) -> None:
+        source = self.store.get_family(self.family_var.get())
+        if source is None:
+            messagebox.showwarning("未选择协议族", "请先选择协议族", parent=self)
+            return
+        usage = self.store.family_usage_count(source.name)
+        if usage and not messagebox.askyesno(
+            "确认编辑",
+            f"该协议族被 {usage} 个产品使用。保存后这些产品的字段名称和结构会同步更新，是否继续？",
+            parent=self,
+        ):
+            return
+        dialog = ProtocolFamilyEditorDialog(self, source)
+        if dialog.result is None:
+            return
+        try:
+            product_id = self.current_product.id if self.current_product else None
+            self.store.update_family(source.name, dialog.result)
+            self._refresh_family_choices(dialog.result.name)
+            if product_id is not None:
+                self._load_product(product_id)
+            else:
+                self._family_changed()
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc), parent=self)
+
     def _family_changed(self) -> None:
-        self._rebuild_fields(_default_fields(self.family_var.get()))
+        family = self.store.get_family(self.family_var.get())
+        self._rebuild_fields(_default_fields(family.fields) if family else {})
 
     def _collect_product(self) -> Product:
         if self.current_product is None:
@@ -865,12 +1303,17 @@ class SimulatorApp(tk.Tk):
             family=self.family_var.get(), ready_pcba_ms=int(self.pcba_var.get()),
             ready_final_ms=int(self.final_var.get()), notify_delay_ms=int(self.notify_var.get()),
             behavior=self.behavior_var.get(), fields=fields,
-            raw_payload_hex=self.raw_var.get().strip(),
+            raw_payload_hex="",
         )
         delays = (product.ready_pcba_ms, product.ready_final_ms, product.notify_delay_ms)
         if any(value < 0 or value > MAX_DELAY_MS for value in delays):
             raise ValueError(f"延时必须在 0..{MAX_DELAY_MS} ms")
-        payload_hex(product.family, product.fields, product.raw_payload_hex)
+        family = self.store.get_family(product.family)
+        if family is None:
+            raise ValueError(f"未知协议族: {product.family}")
+        payload_hex(
+            product.family, product.fields, product.raw_payload_hex, family.fields
+        )
         return product
 
     def _save_product(self) -> None:
@@ -884,22 +1327,8 @@ class SimulatorApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc), parent=self)
 
-    def _validate_payload(self, show_dialog: bool = True) -> None:
-        try:
-            product = self._collect_product()
-            encoded = payload_hex(product.family, product.fields, product.raw_payload_hex)
-            self.payload_var.set(f"{len(encoded) // 2} 字节  {encoded}")
-            if show_dialog:
-                messagebox.showinfo(
-                    "校验通过", f"Payload 长度: {len(encoded) // 2} 字节\n{encoded}", parent=self
-                )
-        except Exception as exc:
-            self.payload_var.set(f"校验失败: {exc}")
-            if show_dialog:
-                messagebox.showerror("校验失败", str(exc), parent=self)
-
     def _add_product(self) -> None:
-        dialog = AddProductDialog(self)
+        dialog = AddProductDialog(self, self.store)
         if dialog.result is None:
             return
         product_id = self.store.add(dialog.result)
@@ -966,7 +1395,12 @@ class SimulatorApp(tk.Tk):
             for index in indexes:
                 node = self.nodes[index]
                 sequence = node.next_sequence()
-                node.send(build_config_command(sequence, product.as_mapping()))
+                family = self.store.get_family(product.family)
+                if family is None:
+                    raise ValueError(f"未知协议族: {product.family}")
+                node.send(build_config_command(
+                    sequence, product.as_mapping(), schema=family.fields
+                ))
                 self.node_pending_sequences[index] = str(sequence)
                 self.node_pending_products[index] = product
                 self._set_node_visual(index, "等待确认", "Warning")
