@@ -16,7 +16,7 @@ class FieldSpec:
     default: Any = 0
 
 MAX_DELAY_MS = 600_000
-BLE_NAME_MAX_BYTES = 18
+BLE_NAME_MAX_BYTES = 29
 
 
 FAMILY_SCHEMAS: Dict[str, Sequence[FieldSpec]] = {

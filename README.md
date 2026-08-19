@@ -21,9 +21,9 @@ TX=GPIO1、RX=GPIO3。ESP32 与原测试板之间仍使用 BLE 通信。
 - 右侧节点区底部集中显示发现的串口数和当前已连接的串口数。
 - BLE 断开事件会在节点状态和运行日志中标红。
 
-现有治具仍通过 MiBeacon Service Data 中的 PID 识别产品。Model 同时作为
-BLE Complete Local Name 下发给固件，UTF-8 编码后最多 18 字节；它用于扫描
-列表辨识，不替代 PID 的产品身份语义。
+现有治具仍通过 MiBeacon Service Data 中的 PID 识别产品。Model 作为
+BLE Scan Response 中的 Complete Local Name 下发给固件，UTF-8 编码后最多 29 字节；它用于
+扫描列表辨识，不替代 PID 的产品身份语义。
 
 “结果通知延时”表示半成品或成品数据达到就绪时间后，固件在发送结果通知前
 额外等待的时间；填 `0` 表示就绪后立即通知。
@@ -60,7 +60,7 @@ python app.py
 
 ## 使用顺序
 
-1. 将包含可配置 BLE 名称与 `DISCONNECT` 命令的 0.2.0 通用模拟固件刷入 ESP32 模拟板。
+1. 将包含可配置 BLE 名称、Scan Response 名称和 `DISCONNECT` 命令的 0.2.1 通用模拟固件刷入 ESP32 模拟板。
 2. 在右侧节点选择串口并点击“连接”；此处连接的是电脑与 ESP32 的配置串口。
 3. 在左侧选择产品，在中间编辑参数并保存模板。
 4. 勾选目标节点。如果节点显示“BLE 已连接”，先点击“断开 BLE”。

@@ -64,9 +64,13 @@ class ProtocolTests(unittest.TestCase):
         encoded = encode_ble_name("E6D-四键")
         self.assertEqual("E6D-四键", decode_ble_name(encoded))
 
-    def test_ble_name_over_18_utf8_bytes_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "18"):
-            encode_ble_name("1234567890123456789")
+    def test_long_ble_name_is_supported_in_scan_response(self):
+        name = "linp.sensor_occupy.es4b"
+        self.assertEqual(name, decode_ble_name(encode_ble_name(name)))
+
+    def test_ble_name_over_29_utf8_bytes_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "29"):
+            encode_ble_name("123456789012345678901234567890")
 
     def test_out_of_range_field_is_rejected(self):
         fields = {"version": 300, "rx_rssi": 0, "illuminance": [0, 0],

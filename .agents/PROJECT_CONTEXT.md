@@ -24,7 +24,7 @@
 - 2026-08-19 - Windows 端配置串口统一为 115200 baud；UART0 与 GPIO1/3 是 ESP32 固件侧约定，Windows 端只选择 COM 口。
 - 2026-08-18 - 清理生成缓存和 IDE 私有元数据，但保留 `dist/` 现有 EXE：当前目录没有 Git，且 README 将 EXE 作为推荐运行方式。
 - 2026-08-18 - 项目指南以当前源码为准；ESP32 固件行为只记录为外部边界。
-- 2026-08-18 - PID 继续作为 MiBeacon 产品身份；Model 作为 BLE Complete Local Name，UTF-8 最多 18 字节，通过 `CONFIG` 第 10 个字段下发。
+- 2026-08-19 - PID 继续作为主广播包中的 MiBeacon 产品身份；Model 作为 Scan Response 中的 BLE Complete Local Name，UTF-8 最多 29 字节，通过 `CONFIG` 第 10 个字段下发。
 
 ## 已完成变更
 
@@ -47,7 +47,7 @@
 ## 当前风险和债务
 
 - 环境风险：系统 `python` 命中 Microsoft Store 占位符；需使用可用 Python 3、Tkinter 和 pyserial 或明确的 Python 路径。
-- 协议风险：新上位机的 10 字段 `CONFIG` 需要配套 0.2.0 固件；旧固件会拒绝该命令。`DISCONNECT`、ACK/ERROR 和真实广播名称仍需硬件联调确认。
+- 协议风险：支持 29 字节 Model 的上位机需要配套 0.2.1 固件；旧 0.2.0 固件的名称缓冲区仍仅支持 18 字节。`DISCONNECT`、ACK/ERROR 和真实广播名称仍需硬件联调确认。
 - 持久化风险：`meta.seeded` 使 `products.json` 只在首次建库时导入；修改种子不会迁移已有用户数据库。协议族表会在现有数据库首次启动新版时自动创建，编辑共享协议族会影响所有引用产品，界面会先提示。
 - 并发风险：串口线程通过队列切回 Tk 主线程；修改关闭、重连或事件处理时需检查重复 `LOCAL_DISCONNECTED` 和状态清理。
 
@@ -82,6 +82,7 @@
 - 2026-08-19 - 模板底部按钮栏回归 - `verified`；实窗像素检查确认操作栏宽 595 px，三个按钮均为 193 px，间隔均为 8 px，左右余量均为 0；18 个单元测试和 `py_compile` 全部通过。
 - 2026-08-19 - 产品名称列对齐回归 - `verified`；运行时 `#0` 列锚点为 `center`，实窗截图确认表头与产品名称同轴居中；18 个单元测试和 `py_compile` 全部通过。
 - 2026-08-19 - 最终打包 - `verified`；生成 `dist/BLE产品产测模拟器-V1-202608190938.exe`，随后清理旧 EXE、`build/`、`*.spec` 和 Python 缓存。
+- 2026-08-19 - 长 BLE 名称回归 - `verified`；19 个单元测试和四个核心模块语法检查通过，`linp.sensor_occupy.es4b` 的 23 字节 UTF-8 Model 可编码，30 字节名称被拒绝；配套 0.2.1 模拟固件已构建成功。未刷机或进行真实 Scan Response、BLE 和治具联调。
 ## 下一步建议
 
 - 下一次代码任务先用可用 Python 运行现有 13 个单元测试，再按需求追踪对应模块。
