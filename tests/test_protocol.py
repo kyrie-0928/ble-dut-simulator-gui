@@ -18,6 +18,8 @@ from protocol import (
     validate_schema,
 )
 from serial_node import SerialNode, parse_sim_line
+from app import family_structure_name
+from storage import public_protocol_name
 
 
 class ProtocolTests(unittest.TestCase):
@@ -34,6 +36,38 @@ class ProtocolTests(unittest.TestCase):
                 self.assertTrue(encoded)
                 self.assertLessEqual(len(encoded) // 2, 64)
                 encode_ble_name(product["model"])
+
+    def test_product_protocol_names_hide_internal_structure_ids(self):
+        expected = {
+            "E5 单键": "E5", "E5 双键": "E5",
+            "E5 三键": "E5", "E5 四键": "E5",
+            "H3 单键": "H3", "H3 双键": "H3", "H3 三键": "H3",
+            "E7D 单键": "E7D", "E7D 双键": "E7D",
+            "E7D 三键": "E7D", "E7D 四键": "E7D",
+            "CE1": "CE1", "CE1-T2": "CE1", "CE1-PRO": "CE1",
+            "C6DB": "C6",
+        }
+        for product in self.products:
+            with self.subTest(product=product["name"]):
+                actual = public_protocol_name(
+                    product["family"], product["name"], product["model"]
+                )
+                self.assertEqual(
+                    expected.get(product["name"], product["family"]), actual
+                )
+                self.assertNotRegex(actual, r"_[1-4]$")
+
+    def test_internal_family_names_have_user_facing_structure_labels(self):
+        expected = {
+            "E5_1": "E5 · 单键字段", "E5_2": "E5 · 双键字段",
+            "E5_3": "E5 · 三键字段", "E5_4": "E5 · 四键字段",
+            "H3_1": "H3 · 单键字段", "H3_2": "H3 · 双键字段",
+            "H3_3": "H3 · 三键字段", "T2DSB": "E7D",
+            "C6": "CE1 / C6",
+        }
+        for internal_name, label in expected.items():
+            with self.subTest(internal_name=internal_name):
+                self.assertEqual(label, family_structure_name(internal_name))
 
     def test_payload_sizes_match_fixture_structures(self):
         expected = {
