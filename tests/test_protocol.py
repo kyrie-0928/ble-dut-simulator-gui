@@ -33,6 +33,7 @@ class ProtocolTests(unittest.TestCase):
                 encoded = payload_hex(product["family"], product["fields"])
                 self.assertTrue(encoded)
                 self.assertLessEqual(len(encoded) // 2, 64)
+                encode_ble_name(product["model"])
 
     def test_payload_sizes_match_fixture_structures(self):
         expected = {
@@ -57,7 +58,7 @@ class ProtocolTests(unittest.TestCase):
     def test_config_command_contains_both_test_delays(self):
         command = build_config_command(7, self.products[-1])
         self.assertTrue(command.startswith("CONFIG 7 39181 4500 8000 0 normal 1 "))
-        self.assertTrue(command.rstrip().endswith("4536442D34"))
+        self.assertTrue(command.rstrip().endswith("6C696E702E7377697463682E6536646234"))
         self.assertTrue(command.endswith("\n"))
 
     def test_model_is_encoded_as_utf8_ble_name(self):

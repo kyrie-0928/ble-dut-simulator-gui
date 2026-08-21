@@ -11,6 +11,28 @@ from typing import Any, Dict, List, Optional, Sequence
 from protocol import FAMILY_SCHEMAS, FieldSpec, pack_fields, validate_schema
 
 
+PUBLIC_PROTOCOL_NAMES = {
+    "E5_1": "E5",
+    "E5_2": "E5",
+    "E5_3": "E5",
+    "E5_4": "E5",
+    "H3_1": "H3",
+    "H3_2": "H3",
+    "H3_3": "H3",
+    "T2DSB": "E7D",
+}
+
+
+def public_protocol_name(family: str, product_name: str, model: str) -> str:
+    if family == "C6":
+        normalized_name = product_name.strip().upper()
+        normalized_model = model.strip().lower()
+        if normalized_name.startswith("C6") or ".c6" in normalized_model:
+            return "C6"
+        return "CE1"
+    return PUBLIC_PROTOCOL_NAMES.get(family, family)
+
+
 @dataclass
 class Product:
     id: Optional[int]
@@ -24,6 +46,7 @@ class Product:
     behavior: str
     fields: Dict[str, Any]
     raw_payload_hex: str = ""
+    protocol_name: str = ""
 
     def as_mapping(self) -> Dict[str, Any]:
         return asdict(self)
@@ -60,6 +83,7 @@ class ProductStore:
         self._connection = sqlite3.connect(str(db_path))
         self._connection.row_factory = sqlite3.Row
         self._create_schema()
+        self._migrate_protocol_names()
         self._seed_families()
         self._seed_once(seed_path)
 
@@ -83,7 +107,8 @@ class ProductStore:
                 notify_delay_ms INTEGER NOT NULL CHECK(notify_delay_ms >= 0),
                 behavior TEXT NOT NULL,
                 fields_json TEXT NOT NULL,
-                raw_payload_hex TEXT NOT NULL DEFAULT ''
+                raw_payload_hex TEXT NOT NULL DEFAULT '',
+                protocol_name TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS protocol_families (
                 name TEXT PRIMARY KEY,
@@ -93,6 +118,31 @@ class ProductStore:
             );
         """)
         self._connection.commit()
+
+    def _migrate_protocol_names(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(products)")
+        }
+        with self._connection:
+            if "protocol_name" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE products "
+                    "ADD COLUMN protocol_name TEXT NOT NULL DEFAULT ''"
+                )
+            rows = self._connection.execute(
+                "SELECT id, name, model, family, protocol_name FROM products"
+            ).fetchall()
+            for row in rows:
+                if str(row["protocol_name"]).strip():
+                    continue
+                protocol_name = public_protocol_name(
+                    row["family"], row["name"], row["model"]
+                )
+                self._connection.execute(
+                    "UPDATE products SET protocol_name=? WHERE id=?",
+                    (protocol_name, row["id"]),
+                )
 
     def _seed_families(self) -> None:
         with self._connection:
@@ -126,6 +176,7 @@ class ProductStore:
             notify_delay_ms=row["notify_delay_ms"], behavior=row["behavior"],
             fields=json.loads(row["fields_json"]),
             raw_payload_hex=row["raw_payload_hex"],
+            protocol_name=row["protocol_name"],
         )
 
     def list(self, search: str = "") -> List[Product]:
@@ -145,16 +196,21 @@ class ProductStore:
     def _insert(self, product: Product) -> int:
         if self.get_family(product.family) is None:
             raise ValueError(f"未知协议族: {product.family}")
+        protocol_name = product.protocol_name.strip() or public_protocol_name(
+            product.family, product.name, product.model
+        )
+        product.protocol_name = protocol_name
         cursor = self._connection.execute(
             """INSERT INTO products
                (name, model, pid, family, ready_pcba_ms, ready_final_ms,
-                notify_delay_ms, behavior, fields_json, raw_payload_hex)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                notify_delay_ms, behavior, fields_json, raw_payload_hex,
+                protocol_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (product.name, product.model, product.pid, product.family,
              product.ready_pcba_ms, product.ready_final_ms,
              product.notify_delay_ms, product.behavior,
              json.dumps(product.fields, ensure_ascii=False),
-             product.raw_payload_hex),
+             product.raw_payload_hex, protocol_name),
         )
         return int(cursor.lastrowid)
 
@@ -167,16 +223,21 @@ class ProductStore:
             raise ValueError("更新产品必须包含 id")
         if self.get_family(product.family) is None:
             raise ValueError(f"未知协议族: {product.family}")
+        protocol_name = product.protocol_name.strip() or public_protocol_name(
+            product.family, product.name, product.model
+        )
+        product.protocol_name = protocol_name
         with self._connection:
             cursor = self._connection.execute(
                 """UPDATE products SET name=?, model=?, pid=?, family=?,
                    ready_pcba_ms=?, ready_final_ms=?, notify_delay_ms=?,
-                   behavior=?, fields_json=?, raw_payload_hex=? WHERE id=?""",
+                   behavior=?, fields_json=?, raw_payload_hex=?,
+                   protocol_name=? WHERE id=?""",
                 (product.name, product.model, product.pid, product.family,
                  product.ready_pcba_ms, product.ready_final_ms,
                  product.notify_delay_ms, product.behavior,
                  json.dumps(product.fields, ensure_ascii=False),
-                 product.raw_payload_hex, product.id),
+                 product.raw_payload_hex, protocol_name, product.id),
             )
             if cursor.rowcount != 1:
                 raise KeyError(product.id)
@@ -244,7 +305,8 @@ class ProductStore:
         defaults = default_fields(family.fields)
         with self._connection:
             rows = self._connection.execute(
-                "SELECT id, fields_json FROM products WHERE family=?", (old_name,)
+                "SELECT id, fields_json, protocol_name FROM products WHERE family=?",
+                (old_name,)
             ).fetchall()
             self._connection.execute(
                 """UPDATE protocol_families
@@ -261,9 +323,17 @@ class ProductStore:
                     except (TypeError, ValueError):
                         value = defaults[field.name]
                     merged[field.name] = value
+                protocol_name = (
+                    name if row["protocol_name"] == old_name
+                    else row["protocol_name"]
+                )
                 self._connection.execute(
-                    "UPDATE products SET family=?, fields_json=? WHERE id=?",
-                    (name, json.dumps(merged, ensure_ascii=False), row["id"]),
+                    """UPDATE products
+                       SET family=?, fields_json=?, protocol_name=? WHERE id=?""",
+                    (
+                        name, json.dumps(merged, ensure_ascii=False),
+                        protocol_name, row["id"],
+                    ),
                 )
 
     def delete_family(self, name: str) -> None:
