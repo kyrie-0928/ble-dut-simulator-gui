@@ -28,7 +28,6 @@ from storage import (
     ProductStore,
     ProtocolFamily,
     default_fields as family_default_fields,
-    public_protocol_name,
 )
 
 APP_NAME = "BLE 产品产测模拟器"
@@ -77,36 +76,49 @@ COLORS = {
 }
 
 FAMILY_STRUCTURE_NAMES = {
-    "E5_1": "E5 · 单键字段",
-    "E5_2": "E5 · 双键字段",
-    "E5_3": "E5 · 三键字段",
-    "E5_4": "E5 · 四键字段",
-    "H3_1": "H3 · 单键字段",
-    "H3_2": "H3 · 双键字段",
-    "H3_3": "H3 · 三键字段",
-    "T2DSB": "E7D",
-    "C6": "CE1 / C6",
+    "E5_SINGLE_KEY": "E5 · 单键字段",
+    "E5_DOUBLE_KEY": "E5 · 双键字段",
+    "E5_THREE_KEY": "E5 · 三键字段",
+    "E5_FOUR_KEY": "E5 · 四键字段",
+    "H3_SINGLE_KEY": "H3 · 单键字段",
+    "H3_DOUBLE_KEY": "H3 · 双键字段",
+    "H3_THREE_KEY": "H3 · 三键字段",
+    "E7D": "E7D",
+    "C6": "C6",
+    "CE1": "CE1",
 }
-PUBLIC_PROTOCOL_FAMILIES = {
+PUBLIC_PROTOCOL_SCHEMAS = {
     "ES4": ("ES4",),
     "ES5": ("ES5",),
     "S5": ("S5",),
-    "E5": ("E5_1", "E5_2", "E5_3", "E5_4"),
-    "H3": ("H3_1", "H3_2", "H3_3"),
-    "E7D": ("T2DSB",),
-    "CE1": ("C6",),
+    "E5": (
+        "E5_SINGLE_KEY", "E5_DOUBLE_KEY",
+        "E5_THREE_KEY", "E5_FOUR_KEY",
+    ),
+    "H3": ("H3_SINGLE_KEY", "H3_DOUBLE_KEY", "H3_THREE_KEY"),
+    "E7D": ("E7D",),
+    "CE1": ("CE1",),
     "C6": ("C6",),
     "E6D": ("E6D",),
 }
-BUILTIN_INTERNAL_FAMILIES = frozenset(
-    family
-    for families in PUBLIC_PROTOCOL_FAMILIES.values()
-    for family in families
+BUILTIN_SCHEMA_NAMES = frozenset(
+    schema_name
+    for schema_names in PUBLIC_PROTOCOL_SCHEMAS.values()
+    for schema_name in schema_names
 )
+SCHEMA_PROTOCOL_NAMES = {
+    schema_name: protocol_name
+    for protocol_name, schema_names in PUBLIC_PROTOCOL_SCHEMAS.items()
+    for schema_name in schema_names
+}
 
 
-def family_structure_name(family: str) -> str:
-    return FAMILY_STRUCTURE_NAMES.get(family, family)
+def family_structure_name(schema_name: str) -> str:
+    return FAMILY_STRUCTURE_NAMES.get(schema_name, schema_name)
+
+
+def protocol_for_schema(schema_name: str) -> str:
+    return SCHEMA_PROTOCOL_NAMES.get(schema_name, schema_name)
 
 
 def _enable_windows_dpi_awareness() -> None:
@@ -667,7 +679,7 @@ class AddProductDialog(simpledialog.Dialog):
         return master.winfo_children()[1]
 
     def _manage_families(self) -> None:
-        selected = self._selected_family_name()
+        selected = self._selected_schema_name()
         ProtocolFamilyManagerDialog(self, self.store)
         families = self.store.list_families()
         self._family_names = [family.name for family in families]
@@ -683,7 +695,7 @@ class AddProductDialog(simpledialog.Dialog):
         )
         self.family_combo.current(index)
 
-    def _selected_family_name(self) -> str:
+    def _selected_schema_name(self) -> str:
         index = self.family_combo.current()
         if 0 <= index < len(self._family_names):
             return self._family_names[index]
@@ -697,7 +709,7 @@ class AddProductDialog(simpledialog.Dialog):
             encode_ble_name(self.model_var.get())
             if not 1 <= pid <= 65535:
                 raise ValueError("PID 必须在 1..65535")
-            if self.store.get_family(self._selected_family_name()) is None:
+            if self.store.get_family(self._selected_schema_name()) is None:
                 raise ValueError("请选择有效的字段结构")
         except ValueError as exc:
             messagebox.showerror("输入错误", str(exc), parent=self)
@@ -705,17 +717,18 @@ class AddProductDialog(simpledialog.Dialog):
         return True
 
     def apply(self) -> None:
-        family = self.store.get_family(self._selected_family_name())
+        family = self.store.get_family(self._selected_schema_name())
         if family is None:
             return
         name = self.name_var.get().strip()
         model = self.model_var.get().strip()
         self.result = Product(
             id=None, name=name, model=model, pid=int(self.pid_var.get()),
-            family=family.name, ready_pcba_ms=5000, ready_final_ms=5000,
+            family=protocol_for_schema(family.name),
+            schema_name=family.name,
+            ready_pcba_ms=5000, ready_final_ms=5000,
             notify_delay_ms=0, behavior="normal",
             fields=_default_fields(family.fields),
-            protocol_name=public_protocol_name(family.name, name, model),
         )
 
 
@@ -798,7 +811,7 @@ class SimulatorApp(tk.Tk):
             SerialNode(index + 1, self._queue_node_event) for index in range(NODE_COUNT)
         ]
         self.current_product: Optional[Product] = None
-        self.selected_family_name = ""
+        self.selected_schema_name = ""
         self.selected_protocol_name = ""
         self.field_vars: Dict[str, tk.StringVar] = {}
         self.node_selected: List[tk.BooleanVar] = []
@@ -1559,14 +1572,14 @@ class SimulatorApp(tk.Tk):
         }
         choices = [
             protocol_name
-            for protocol_name, candidates in PUBLIC_PROTOCOL_FAMILIES.items()
+            for protocol_name, candidates in PUBLIC_PROTOCOL_SCHEMAS.items()
             if any(candidate in family_names for candidate in candidates)
         ]
         choices.extend(
             sorted(
                 family_name
                 for family_name in family_names
-                if family_name not in BUILTIN_INTERNAL_FAMILIES
+                if family_name not in BUILTIN_SCHEMA_NAMES
             )
         )
         if (
@@ -1595,7 +1608,7 @@ class SimulatorApp(tk.Tk):
         return key_field.count if key_field is not None else 0
 
     def _suggest_family_variant(self, candidates: Sequence[str]) -> str:
-        current_key_count = self._family_key_count(self.selected_family_name)
+        current_key_count = self._family_key_count(self.selected_schema_name)
         if current_key_count:
             for candidate in candidates:
                 if self._family_key_count(candidate) == current_key_count:
@@ -1608,7 +1621,7 @@ class SimulatorApp(tk.Tk):
         family_names = {
             family.name for family in self.store.list_families()
         }
-        mapped_candidates = PUBLIC_PROTOCOL_FAMILIES.get(protocol_name)
+        mapped_candidates = PUBLIC_PROTOCOL_SCHEMAS.get(protocol_name)
         if mapped_candidates is None:
             candidates = (
                 (protocol_name,) if protocol_name in family_names else ()
@@ -1626,8 +1639,8 @@ class SimulatorApp(tk.Tk):
                 parent=self,
             )
             return None
-        if self.selected_family_name in candidates:
-            return self.selected_family_name
+        if self.selected_schema_name in candidates:
+            return self.selected_schema_name
         if len(candidates) == 1:
             return candidates[0]
         dialog = ProtocolStructureChoiceDialog(
@@ -1649,9 +1662,9 @@ class SimulatorApp(tk.Tk):
         if family_name is None:
             self.family_var.set(self.selected_protocol_name)
             return
-        previous_family_name = self.selected_family_name
+        previous_family_name = self.selected_schema_name
         self.selected_protocol_name = protocol_name
-        self.selected_family_name = family_name
+        self.selected_schema_name = family_name
         if family_name != previous_family_name:
             family = self.store.get_family(family_name)
             if family is not None:
@@ -1665,11 +1678,8 @@ class SimulatorApp(tk.Tk):
         self.name_var.set(product.name)
         self.model_var.set(product.model)
         self.pid_var.set(str(product.pid))
-        self.selected_family_name = product.family
-        self.selected_protocol_name = (
-            product.protocol_name
-            or public_protocol_name(product.family, product.name, product.model)
-        )
+        self.selected_schema_name = product.schema_name
+        self.selected_protocol_name = product.family
         self._refresh_protocol_choices(self.selected_protocol_name)
         self.pcba_var.set(str(product.ready_pcba_ms))
         self.final_var.set(str(product.ready_final_ms))
@@ -1682,7 +1692,7 @@ class SimulatorApp(tk.Tk):
         for child in self.fields_frame.winfo_children():
             child.destroy()
         self.field_vars.clear()
-        family = self.store.get_family(self.selected_family_name)
+        family = self.store.get_family(self.selected_schema_name)
         if family is None:
             self._schedule_fields_canvas_layout()
             return
@@ -1712,7 +1722,7 @@ class SimulatorApp(tk.Tk):
             self._load_product(product_id)
 
     def _edit_current_family(self) -> None:
-        source = self.store.get_family(self.selected_family_name)
+        source = self.store.get_family(self.selected_schema_name)
         if source is None:
             messagebox.showwarning("未选择字段结构", "请先选择字段结构", parent=self)
             return
@@ -1746,25 +1756,26 @@ class SimulatorApp(tk.Tk):
         if not 1 <= pid <= 65535:
             raise ValueError("PID 必须在 1..65535")
         fields = {name: variable.get() for name, variable in self.field_vars.items()}
-        if not self.selected_family_name or not self.selected_protocol_name:
+        if not self.selected_schema_name or not self.selected_protocol_name:
             raise ValueError("请选择有效的协议")
         product = Product(
             id=self.current_product.id, name=name, model=model, pid=pid,
-            family=self.selected_family_name,
+            family=self.selected_protocol_name,
+            schema_name=self.selected_schema_name,
             ready_pcba_ms=int(self.pcba_var.get()),
             ready_final_ms=int(self.final_var.get()), notify_delay_ms=int(self.notify_var.get()),
             behavior=self.behavior_var.get(), fields=fields,
             raw_payload_hex="",
-            protocol_name=self.selected_protocol_name,
         )
         delays = (product.ready_pcba_ms, product.ready_final_ms, product.notify_delay_ms)
         if any(value < 0 or value > MAX_DELAY_MS for value in delays):
             raise ValueError(f"延时必须在 0..{MAX_DELAY_MS} ms")
-        family = self.store.get_family(product.family)
+        family = self.store.get_family(product.schema_name)
         if family is None:
-            raise ValueError(f"未知字段结构: {product.family}")
+            raise ValueError(f"未知字段结构: {product.schema_name}")
         payload_hex(
-            product.family, product.fields, product.raw_payload_hex, family.fields
+            product.schema_name, product.fields,
+            product.raw_payload_hex, family.fields
         )
         return product
 
@@ -1805,7 +1816,7 @@ class SimulatorApp(tk.Tk):
             return
         self.store.delete(int(self.current_product.id))
         self.current_product = None
-        self.selected_family_name = ""
+        self.selected_schema_name = ""
         self.selected_protocol_name = ""
         self._refresh_protocol_choices()
         self._refresh_products()
@@ -1850,9 +1861,9 @@ class SimulatorApp(tk.Tk):
             for index in indexes:
                 node = self.nodes[index]
                 sequence = node.next_sequence()
-                family = self.store.get_family(product.family)
+                family = self.store.get_family(product.schema_name)
                 if family is None:
-                    raise ValueError(f"未知字段结构: {product.family}")
+                    raise ValueError(f"未知字段结构: {product.schema_name}")
                 node.send(build_config_command(
                     sequence, product.as_mapping(), schema=family.fields
                 ))

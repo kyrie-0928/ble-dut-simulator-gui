@@ -19,7 +19,6 @@ from protocol import (
 )
 from serial_node import SerialNode, parse_sim_line
 from app import family_structure_name
-from storage import public_protocol_name
 
 
 class ProtocolTests(unittest.TestCase):
@@ -32,12 +31,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(22, len({item["pid"] for item in self.products}))
         for product in self.products:
             with self.subTest(pid=product["pid"]):
-                encoded = payload_hex(product["family"], product["fields"])
+                encoded = payload_hex(product["schema_name"], product["fields"])
                 self.assertTrue(encoded)
                 self.assertLessEqual(len(encoded) // 2, 64)
                 encode_ble_name(product["model"])
 
-    def test_product_protocol_names_hide_internal_structure_ids(self):
+    def test_products_use_public_protocol_and_current_schema_names(self):
         expected = {
             "E5 单键": "E5", "E5 双键": "E5",
             "E5 三键": "E5", "E5 四键": "E5",
@@ -49,21 +48,26 @@ class ProtocolTests(unittest.TestCase):
         }
         for product in self.products:
             with self.subTest(product=product["name"]):
-                actual = public_protocol_name(
-                    product["family"], product["name"], product["model"]
-                )
                 self.assertEqual(
-                    expected.get(product["name"], product["family"]), actual
+                    expected.get(product["name"], product["family"]),
+                    product["family"],
                 )
-                self.assertNotRegex(actual, r"_[1-4]$")
-
+                self.assertNotIn("protocol_name", product)
+                self.assertNotIn(
+                    product["schema_name"],
+                    {"E5_1", "E5_2", "E5_3", "E5_4",
+                     "H3_1", "H3_2", "H3_3", "T2DSB"},
+                )
     def test_internal_family_names_have_user_facing_structure_labels(self):
         expected = {
-            "E5_1": "E5 · 单键字段", "E5_2": "E5 · 双键字段",
-            "E5_3": "E5 · 三键字段", "E5_4": "E5 · 四键字段",
-            "H3_1": "H3 · 单键字段", "H3_2": "H3 · 双键字段",
-            "H3_3": "H3 · 三键字段", "T2DSB": "E7D",
-            "C6": "CE1 / C6",
+            "E5_SINGLE_KEY": "E5 · 单键字段",
+            "E5_DOUBLE_KEY": "E5 · 双键字段",
+            "E5_THREE_KEY": "E5 · 三键字段",
+            "E5_FOUR_KEY": "E5 · 四键字段",
+            "H3_SINGLE_KEY": "H3 · 单键字段",
+            "H3_DOUBLE_KEY": "H3 · 双键字段",
+            "H3_THREE_KEY": "H3 · 三键字段",
+            "E7D": "E7D", "C6": "C6", "CE1": "CE1",
         }
         for internal_name, label in expected.items():
             with self.subTest(internal_name=internal_name):
@@ -79,7 +83,7 @@ class ProtocolTests(unittest.TestCase):
             39178: 11, 39179: 11, 39180: 11, 39181: 11,
         }
         for product in self.products:
-            payload = pack_payload(product["family"], product["fields"])
+            payload = pack_payload(product["schema_name"], product["fields"])
             self.assertEqual(expected[product["pid"]], len(payload), product["pid"])
 
     def test_values_are_little_endian_and_signed(self):

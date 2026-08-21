@@ -13,7 +13,7 @@
 - `app.py` - active；Tkinter UI 和业务编排，管理产品编辑、6 个节点、命令待确认状态及串口事件队列。
 - `protocol.py` - active；产品族 schema、Payload 打包、BLE 名称编解码和 `CONFIG` 命令格式。
 - `serial_node.py` - active；pyserial 适配、后台读线程、写锁、序号和 `@SIM` 解析。
-- `storage.py` / `products.json` - active；SQLite CRUD、动态协议族定义、兼容迁移与仅首次导入的种子数据。
+- `storage.py` / `products.json` - active；SQLite CRUD、公开协议 `family`、字段结构 `schema_name`、旧库兼容迁移与仅首次导入的种子数据。
 - `tests/` - active；覆盖无需硬件的协议、模板、串口默认参数与存储回归。
 - `build/`、`*.spec`、`__pycache__/` - generated；可删除重建。`dist/` - generated/deliverable；未确认交付需求前不清理。
 - `build_app.ps1` - active 打包入口；`start.bat` 已按用户要求删除。
@@ -54,12 +54,13 @@
 
 - 2026-08-20 - 界面“协议”采用产品级名称：E5/H3/E6D/E7D 不区分按键数，CE1/CE1-T2/CE1-PRO 显示 CE1，C6DB 显示 C6；数据库内部结构 ID 继续决定字段结构和 Payload，不作为用户协议名显示。
 - 2026-08-20 - 主模板区“协议”恢复为可选下拉框，只显示公开协议名；数据库新增独立 protocol_name 并兼容迁移旧库，内部 family 继续决定字段结构和 Payload。切换 E5/H3 且无法继承当前结构时，先选择具体字段结构。
+- 2026-08-21 - 上述临时双字段方案已被替代：amily 直接保存公开协议，schema_name 保存 Payload 字段结构，删除当前 protocol_name；E5/H3 字段结构改用描述性名称，E7D、CE1、C6 各自独立。旧标识只在 SQLite 迁移映射中保留，用于无损升级既有模板。
 
 ## 当前风险和债务
 
 - 环境风险：系统 `python` 命中 Microsoft Store 占位符；需使用可用 Python 3、Tkinter 和 pyserial 或明确的 Python 路径。
 - 协议风险：支持 29 字节 Model 的上位机需要配套 0.2.1 固件；旧 0.2.0 固件的名称缓冲区仍仅支持 18 字节。`DISCONNECT`、ACK/ERROR 和真实广播名称仍需硬件联调确认。
-- 持久化风险：`meta.seeded` 使 `products.json` 只在首次建库时导入；修改种子不会迁移已有用户数据库。协议族表会在现有数据库首次启动新版时自动创建，编辑共享协议族会影响所有引用产品，界面会先提示。
+- 持久化风险：`meta.seeded` 使 `products.json` 只在首次建库时导入，不会覆盖用户已调整的模板；本次协议字段与旧结构标识由 SQLite 启动迁移单独升级。编辑共享字段结构会影响所有引用产品，界面会先提示。
 - 并发风险：串口线程通过队列切回 Tk 主线程；修改关闭、重连或事件处理时需检查重复 `LOCAL_DISCONNECTED` 和状态清理。
 
 ## 维护入口
@@ -125,6 +126,7 @@
 
 - 2026-08-20 - 可选协议与持久化迁移回归 - verified；主协议控件为只读下拉选择，公开协议名与内部字段结构分别保存。24 个单元测试和四个核心模块 py_compile 全部通过；隔离 Tk 窗口确认 CE1/C6 独立保存、E5 原结构保留及 E5/H3 跨协议结构选择。CONFIG/Payload 格式未变；未连接真实 COM、ESP32、BLE、六节点或治具。
 - 2026-08-20 - 可选协议版 EXE 打包 - verified；生成并复制 C:\Users\kyrie\Desktop\上位机\BLE产品产测模拟器-V1-202608201726.exe，SHA-256 为 D24A2C2274A119DACA014A2BD2CDC00AF441AF3691648E4B0E535F9C89E395A1，大小 12,661,842 字节，复制前后哈希一致并保留旧版本。新 EXE 未启动；未连接真实 COM、ESP32、BLE、六节点或治具。
+- 2026-08-21 - 旧协议标识清理回归 - erified；products.json 的 22 个模板全部改为公开 amily 与描述性 schema_name，当前数据库结构移除 protocol_name。24 个单元测试与核心模块 py_compile 全部通过，覆盖旧数据库的模板 ID、字段、公开协议和字段结构迁移；CONFIG/Payload 格式未变。未连接真实 COM、ESP32、BLE、六节点或治具。
 ## 下一步建议
 
 - 下一次代码任务先用可用 Python 运行现有 24 个单元测试，再按需求追踪对应模块。
